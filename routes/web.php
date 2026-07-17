@@ -17,17 +17,17 @@ Route::middleware(['auth', 'verified'])->group(function () {
 
     // Bank Files
     Route::get('/bank-files', [BankFileController::class, 'index'])->name('bank-files.index');
-    Route::get('/bank-files/summary', [BankFileController::class, 'summary'])->name('bank-files.summary')->can('upload-bank-file');
+
+    // Bulk Upload - superadmin only
+    Route::middleware(['can:bulk-upload-bank-files'])->group(function () {
+        Route::get('/bulk-upload/files', [BankFileController::class, 'create'])->name('bulk-upload.create');
+        Route::post('/bulk-upload/files', [BankFileController::class, 'store'])->name('bulk-upload.store');
+        Route::get('/bulk-upload/monitor', [BankFileController::class, 'bulkIndex'])->name('bulk-upload.index');
+        Route::get('/bulk-upload/summary', [BankFileController::class, 'summary'])->name('bank-files.summary');
+    });
 
     // Parameterized route for individual bank files
     Route::get('/bank-files/{bankFile}', [BankFileController::class, 'show'])->name('bank-files.show');
-
-    // Upload - Protected by gate
-    Route::get('/bank-files/create/upload', [BankFileController::class, 'create'])->name('bank-files.create')->can('upload-bank-file');
-    Route::post('/bank-files', [BankFileController::class, 'store'])->name('bank-files.store')->can('upload-bank-file');
-
-    // Bulk Upload Summary
-    Route::get('/bank-files/summary', [BankFileController::class, 'summary'])->name('bank-files.summary')->can('upload-bank-file');
 
     // Downloads
     Route::get('/bank-files/{bankFile}/rejects', [BankFileController::class, 'downloadRejects'])->name('bank-files.download-rejects');
@@ -37,7 +37,9 @@ Route::middleware(['auth', 'verified'])->group(function () {
     Route::get('/transactions', [BankTransactionController::class, 'index'])->name('transactions.index');
     Route::get('/transactions/export', [BankTransactionController::class, 'export'])->name('transactions.export');
     Route::get('/transactions/{bankTransaction}', [BankTransactionController::class, 'show'])->name('transactions.show');
-    Route::delete('/transactions/{bankTransaction}', [BankTransactionController::class, 'destroy'])->name('transactions.destroy');
+    Route::delete('/transactions/{bankTransaction}', [BankTransactionController::class, 'destroy'])
+        ->middleware('can:delete-transactions')
+        ->name('transactions.destroy');
 
     // Exports - Two types: ALL and TODAY
     Route::prefix('/export')->name('export.')->group(function () {
@@ -53,8 +55,10 @@ Route::middleware(['auth', 'verified'])->group(function () {
         Route::get('/admin/users', [AdminController::class, 'users'])->name('admin.users');
         Route::post('/admin/users', [AdminController::class, 'storeUser'])->name('admin.users.store');
         Route::put('/admin/users/{user}', [AdminController::class, 'updateUser'])->name('admin.users.update');
-        Route::delete('/admin/users/{user}', [AdminController::class, 'destroyUser'])->name('admin.users.destroy'); // Optional
-        
+        Route::delete('/admin/users/{user}', [AdminController::class, 'destroyUser'])->name('admin.users.destroy');
+    });
+
+    Route::middleware(['can:config-system'])->group(function () {
         Route::get('/admin/config', [AdminController::class, 'config'])->name('admin.config');
         Route::post('/admin/config', [AdminController::class, 'updateConfig'])->name('admin.config.update');
     });
@@ -65,7 +69,7 @@ Route::middleware(['auth', 'verified'])->group(function () {
 });
 
 // API Routes for bulk uploads
-Route::middleware(['auth', 'verified'])->prefix('/api')->group(function () {
+Route::middleware(['auth', 'verified', 'can:bulk-upload-bank-files'])->prefix('/api')->group(function () {
     Route::get('/bank-files/bulk-stats', [BankFileController::class, 'bulkUploadStats'])->name('api.bulk-upload-stats');
 });
 

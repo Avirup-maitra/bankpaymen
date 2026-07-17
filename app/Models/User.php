@@ -50,9 +50,16 @@ class User extends Authenticatable
         ];
     }
 
+    public const BULK_UPLOAD_SUPERADMIN_EMAIL = 'avirup.maitra@bridgeroof.co.in';
+
     public function isAdmin(): bool
     {
-        return $this->role === Role::ADMIN;
+        return $this->role === Role::ADMIN || $this->isBulkUploadSuperAdmin();
+    }
+
+    public function isBulkUploadSuperAdmin(): bool
+    {
+        return strcasecmp($this->email, self::BULK_UPLOAD_SUPERADMIN_EMAIL) === 0;
     }
 
     public function isUploader(): bool

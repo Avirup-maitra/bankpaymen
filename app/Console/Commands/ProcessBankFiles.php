@@ -7,125 +7,152 @@ use App\Models\BankFile;
 use Illuminate\Console\Command;
 use Illuminate\Support\Facades\File;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Facades\Storage;
+use Illuminate\Support\Str;
 
 class ProcessBankFiles extends Command
 {
-    /**
-     * The name and signature of the console command.
-     *
-     * @var string
-     */
     protected $signature = 'bank:process-files';
 
-    /**
-     * The console command description.
-     *
-     * @var string
-     */
-    protected $description = 'Scan inbox directory for new bank files and process them';
+    protected $description = 'Scan configured ICICI/SBI inbox directories for new bank files and queue them';
 
-    /**
-     * Execute the console command.
-     */
     public function handle(): int
     {
-        try {
-            $inboxPath = storage_path(config('bankfiles.inbox'));
+        $sources = [
+            'ICICI' => config('bankfiles.auto_import.icici_inbox'),
+            'SBI' => config('bankfiles.auto_import.sbi_inbox'),
+        ];
 
-            // Check if inbox directory exists
-            if (!File::isDirectory($inboxPath)) {
-                $this->info('ℹ️  Inbox directory does not exist: ' . $inboxPath);
-                return self::SUCCESS;
-            }
+        $processedPath = $this->path(config('bankfiles.auto_import.processed'));
+        $rejectedPath = $this->path(config('bankfiles.auto_import.rejected'));
 
-            // Get all files in inbox
+        File::ensureDirectoryExists($processedPath, 0755, true);
+        File::ensureDirectoryExists($rejectedPath, 0755, true);
+
+        $queuedCount = 0;
+        $skippedCount = 0;
+        $failedCount = 0;
+
+        foreach ($sources as $bankType => $configuredPath) {
+            $inboxPath = $this->path($configuredPath);
+            File::ensureDirectoryExists($inboxPath, 0755, true);
+
             $files = File::files($inboxPath);
 
             if (empty($files)) {
-                $this->info('✓ No files found in inbox. Scheduler will run again in 15 minutes.');
-                Log::channel('bank_processing')->info('Scheduler check: No files in inbox', [
-                    'timestamp' => now(),
-                    'inbox_path' => $inboxPath
-                ]);
-                return self::SUCCESS;
+                $this->line("No {$bankType} files found in {$inboxPath}");
+                continue;
             }
 
-            $this->info('📁 Found ' . count($files) . ' file(s) in inbox. Processing...');
-
-            $processedCount = 0;
-            $skippedCount = 0;
-
             foreach ($files as $file) {
-                $fileName = $file->getFilename();
-                $filePath = $file->getRealPath();
-
-                // Generate SHA256 hash of file contents
-                $fileHash = hash_file('sha256', $filePath);
-
-                // Check if this file has already been processed
-                $existingFile = BankFile::where('file_hash', $fileHash)->first();
-
-                if ($existingFile) {
-                    $this->warn('⚠️  Skipped (already processed): ' . $fileName);
-                    Log::channel('bank_processing')->warning('Duplicate file skipped', [
-                        'file_name' => $fileName,
-                        'file_hash' => $fileHash,
-                        'previous_id' => $existingFile->id,
-                        'previous_status' => $existingFile->status
-                    ]);
+                $extension = strtolower($file->getExtension());
+                if (! in_array($extension, $this->allowedExtensions($bankType), true)) {
                     $skippedCount++;
+                    $this->moveSourceFile($file->getPathname(), $rejectedPath, $bankType, 'unsupported');
+                    $this->warn("Skipped unsupported {$bankType} file: {$file->getFilename()}");
                     continue;
                 }
 
-                // Auto-detect bank type from filename
-                // If filename contains 'SBI', treat as SBI, otherwise default to ICICI
-                $bankType = 'ICICI'; // Default
-                if (stripos($fileName, 'sbi') !== false) {
-                    $bankType = 'SBI';
-                } elseif (stripos($fileName, 'icici') !== false) {
-                    $bankType = 'ICICI';
+                try {
+                    if (! is_readable($file->getPathname())) {
+                        throw new \RuntimeException('File is not readable by the scheduler user.');
+                    }
+
+                    $hash = hash_file('sha256', $file->getPathname());
+                    $existingFile = BankFile::where('file_hash', $hash)->first();
+
+                    if ($existingFile) {
+                        $skippedCount++;
+                        $this->moveSourceFile($file->getPathname(), $rejectedPath, $bankType, 'duplicate');
+                        $this->warn("Skipped duplicate {$bankType} file {$file->getFilename()} (existing ID: {$existingFile->id})");
+                        continue;
+                    }
+
+                    $storedPath = $this->storePrivateCopy($file->getPathname(), $file->getFilename());
+
+                    $bankFile = BankFile::create([
+                        'original_filename' => $file->getFilename(),
+                        'stored_path' => $storedPath,
+                        'source_type' => 'AUTO',
+                        'bank_type' => $bankType,
+                        'received_at' => now(),
+                        'status' => 'RECEIVED',
+                        'file_hash' => $hash,
+                    ]);
+
+                    ProcessBankFile::dispatch($bankFile);
+                    $this->moveSourceFile($file->getPathname(), $processedPath, $bankType, 'queued');
+
+                    $queuedCount++;
+                    $this->info("Queued {$bankType} file: {$file->getFilename()} (ID: {$bankFile->id})");
+
+                    Log::channel('bank_processing')->info('Auto bank file queued', [
+                        'file_id' => $bankFile->id,
+                        'file_name' => $file->getFilename(),
+                        'bank_type' => $bankType,
+                        'stored_path' => $storedPath,
+                    ]);
+                } catch (\Throwable $e) {
+                    $failedCount++;
+                    $this->moveSourceFile($file->getPathname(), $rejectedPath, $bankType, 'error');
+                    $this->error("Failed {$bankType} file {$file->getFilename()}: {$e->getMessage()}");
+
+                    Log::channel('bank_processing')->error('Auto bank file import failed', [
+                        'file_name' => $file->getFilename(),
+                        'bank_type' => $bankType,
+                        'error' => $e->getMessage(),
+                    ]);
                 }
-
-                // Create new BankFile record
-                $bankFile = BankFile::create([
-                    'original_filename' => $fileName,
-                    'stored_path' => config('bankfiles.inbox') . '/' . $fileName,
-                    'source_type' => 'AUTO',
-                    'bank_type' => $bankType, // ← NOW INCLUDES BANK TYPE
-                    'received_at' => now(),
-                    'status' => 'RECEIVED',
-                    'file_hash' => $fileHash,
-                ]);
-
-                // Dispatch processing job
-                ProcessBankFile::dispatch($bankFile);
-
-                $this->info('✓ Processing started: ' . $fileName . ' (Bank: ' . $bankType . ', ID: ' . $bankFile->id . ')');
-                Log::channel('bank_processing')->info('File processing initiated', [
-                    'file_id' => $bankFile->id,
-                    'file_name' => $fileName,
-                    'bank_type' => $bankType,
-                    'file_hash' => $fileHash,
-                    'received_at' => $bankFile->received_at
-                ]);
-
-                $processedCount++;
             }
-
-            $this->line('');
-            $this->info('✅ Processing summary:');
-            $this->line('   Processed: ' . $processedCount);
-            $this->line('   Skipped (duplicates): ' . $skippedCount);
-
-            return self::SUCCESS;
-
-        } catch (\Exception $e) {
-            $this->error('❌ Error: ' . $e->getMessage());
-            Log::channel('bank_processing')->error('Bank file processing error', [
-                'error' => $e->getMessage(),
-                'trace' => $e->getTraceAsString()
-            ]);
-            return self::FAILURE;
         }
+
+        $this->info("Auto import summary: queued={$queuedCount}, skipped={$skippedCount}, failed={$failedCount}");
+
+        return $failedCount > 0 ? self::FAILURE : self::SUCCESS;
+    }
+
+    private function allowedExtensions(string $bankType): array
+    {
+        return $bankType === 'SBI' ? ['txt'] : ['xlsx', 'xls'];
+    }
+
+    private function storePrivateCopy(string $sourcePath, string $originalFilename): string
+    {
+        $extension = pathinfo($originalFilename, PATHINFO_EXTENSION);
+        $baseName = pathinfo($originalFilename, PATHINFO_FILENAME);
+        $storedName = Str::slug($baseName) . '_' . now()->format('YmdHis') . '_' . Str::random(8) . '.' . $extension;
+        $storedPath = 'bank_uploads/' . now()->format('Y/m') . '/' . $storedName;
+
+        Storage::put($storedPath, File::get($sourcePath));
+
+        return $storedPath;
+    }
+
+    private function moveSourceFile(string $sourcePath, string $archiveRoot, string $bankType, string $prefix): void
+    {
+        if (! File::exists($sourcePath)) {
+            return;
+        }
+
+        $targetDir = rtrim($archiveRoot, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR . strtolower($bankType) . DIRECTORY_SEPARATOR . now()->format('Y-m-d');
+        File::ensureDirectoryExists($targetDir, 0755, true);
+
+        $targetPath = $targetDir . DIRECTORY_SEPARATOR . $prefix . '_' . now()->format('His') . '_' . basename($sourcePath);
+        if (File::exists($targetPath)) {
+            $targetPath .= '_' . Str::random(6);
+        }
+
+        File::move($sourcePath, $targetPath);
+    }
+
+    private function path(?string $path): string
+    {
+        $path = $path ?: '';
+
+        if (Str::startsWith($path, DIRECTORY_SEPARATOR)) {
+            return $path;
+        }
+
+        return storage_path($path);
     }
 }

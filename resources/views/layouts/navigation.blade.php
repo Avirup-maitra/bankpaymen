@@ -26,9 +26,12 @@
                         {{ __('Transactions') }}
                     </x-nav-link>
                     
-                    @can('upload-bank-file')
-                        <x-nav-link :href="route('bank-files.create')" :active="request()->routeIs('bank-files.create')">
-                            {{ __('Upload') }}
+                    @can('bulk-upload-bank-files')
+                        <x-nav-link :href="route('bulk-upload.create')" :active="request()->routeIs('bulk-upload.create')">
+                            {{ __('Upload Files') }}
+                        </x-nav-link>
+                        <x-nav-link :href="route('bulk-upload.index')" :active="request()->routeIs('bulk-upload.index') || request()->routeIs('bank-files.summary')">
+                            {{ __('Bulk Upload') }}
                         </x-nav-link>
                     @endcan
 
@@ -109,6 +112,20 @@
             <x-responsive-nav-link :href="route('dashboard')" :active="request()->routeIs('dashboard')">
                 {{ __('Dashboard') }}
             </x-responsive-nav-link>
+            <x-responsive-nav-link :href="route('bank-files.index')" :active="request()->routeIs('bank-files.*') && ! request()->routeIs('bank-files.summary')">
+                {{ __('Bank Files') }}
+            </x-responsive-nav-link>
+            <x-responsive-nav-link :href="route('transactions.index')" :active="request()->routeIs('transactions.*')">
+                {{ __('Transactions') }}
+            </x-responsive-nav-link>
+            @can('bulk-upload-bank-files')
+                <x-responsive-nav-link :href="route('bulk-upload.create')" :active="request()->routeIs('bulk-upload.create')">
+                    {{ __('Upload Files') }}
+                </x-responsive-nav-link>
+                <x-responsive-nav-link :href="route('bulk-upload.index')" :active="request()->routeIs('bulk-upload.index') || request()->routeIs('bank-files.summary')">
+                    {{ __('Bulk Upload') }}
+                </x-responsive-nav-link>
+            @endcan
         </div>
 
         <!-- Responsive Settings Options -->

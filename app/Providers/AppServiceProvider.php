@@ -23,15 +23,23 @@ class AppServiceProvider extends ServiceProvider
     public function boot(): void
     {
         Gate::define('upload-bank-file', function (User $user) {
-            return in_array($user->role, [Role::ADMIN, Role::UPLOADER]);
+            return $user->isBulkUploadSuperAdmin();
+        });
+
+        Gate::define('bulk-upload-bank-files', function (User $user) {
+            return $user->isBulkUploadSuperAdmin();
         });
 
         Gate::define('manage-users', function (User $user) {
-            return $user->role === Role::ADMIN;
+            return $user->isBulkUploadSuperAdmin();
         });
 
         Gate::define('config-system', function (User $user) {
-            return $user->role === Role::ADMIN;
+            return $user->isBulkUploadSuperAdmin();
+        });
+
+        Gate::define('delete-transactions', function (User $user) {
+            return $user->isBulkUploadSuperAdmin();
         });
 
         Gate::define('reprocess-file', function (User $user) {

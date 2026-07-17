@@ -33,4 +33,9 @@ class BankFile extends Model
     {
         return $this->belongsTo(User::class, 'created_by');
     }
+
+    public function bulkUploadSession(): BelongsTo
+    {
+        return $this->belongsTo(BulkUploadSession::class);
+    }
 }

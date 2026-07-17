@@ -1,0 +1,600 @@
+<?php
+
+namespace App\Console\Commands;
+
+use App\Models\BankFile;
+use Carbon\Carbon;
+use Illuminate\Console\Command;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Schema;
+use Illuminate\Support\Facades\Storage;
+use Illuminate\Support\Str;
+use Throwable;
+
+class RebuildBankUploadsFromStorage extends Command
+{
+    protected $signature = 'bank:rebuild-uploads
+        {--path=bank_uploads/2026/05 : Path relative to storage/app/private}
+        {--bank=ALL : ALL, ICICI or SBI}
+        {--created-by= : Existing user ID to assign as uploader}
+        {--dry-run : Scan and report only}
+        {--limit=0 : Maximum number of files to handle; 0 means all}
+        {--chunk=500 : Number of records per database transaction}';
+
+    protected $description =
+        'Rebuild missing bank_files database records from files stored under storage/app/private';
+
+    private int $scanned = 0;
+    private int $eligible = 0;
+    private int $created = 0;
+    private int $existing = 0;
+    private int $unsupported = 0;
+    private int $failed = 0;
+
+    public function handle(): int
+    {
+        $disk = Storage::disk('local');
+
+        $requestedPath = trim((string) $this->option('path'), '/');
+        $storagePath = $this->normalisePrivatePath($requestedPath);
+
+        $bankFilter = strtoupper(trim((string) $this->option('bank')));
+
+        if (!in_array($bankFilter, ['ALL', 'ICICI', 'SBI'], true)) {
+            $this->error('--bank must be ALL, ICICI or SBI.');
+
+            return self::FAILURE;
+        }
+
+        $dryRun = (bool) $this->option('dry-run');
+        $limit = max(0, (int) $this->option('limit'));
+        $chunkSize = max(1, (int) $this->option('chunk'));
+
+        $createdBy = $this->resolveCreatedBy();
+
+        if (!$disk->exists($storagePath)) {
+            $this->error("Storage directory does not exist: {$storagePath}");
+            $this->line(
+                'Absolute expected location: ' .
+                storage_path('app/' . $storagePath)
+            );
+
+            return self::FAILURE;
+        }
+
+        if (!Schema::hasTable('bank_files')) {
+            $this->error('The bank_files table does not exist.');
+
+            return self::FAILURE;
+        }
+
+        $this->newLine();
+        $this->info('Bank upload recovery scan');
+        $this->table(
+            ['Setting', 'Value'],
+            [
+                ['Storage path', storage_path('app/' . $storagePath)],
+                ['Bank filter', $bankFilter],
+                ['Created by', $createdBy ?? 'NULL'],
+                ['Dry run', $dryRun ? 'YES' : 'NO'],
+                ['Limit', $limit === 0 ? 'No limit' : $limit],
+                ['Chunk size', $chunkSize],
+            ]
+        );
+
+        $files = $disk->allFiles($storagePath);
+
+        if (empty($files)) {
+            $this->warn('No files were found.');
+
+            return self::SUCCESS;
+        }
+
+        sort($files);
+
+        $buffer = [];
+
+        foreach ($files as $relativePath) {
+            $this->scanned++;
+
+            if ($limit > 0 && $this->eligible >= $limit) {
+                break;
+            }
+
+            $extension = strtolower(pathinfo($relativePath, PATHINFO_EXTENSION));
+
+            if (!in_array($extension, ['xls', 'xlsx', 'csv', 'txt'], true)) {
+                $this->unsupported++;
+                continue;
+            }
+
+            $bankType = $this->detectBankType($relativePath);
+
+            if ($bankType === null) {
+                $this->unsupported++;
+                continue;
+            }
+
+            if ($bankFilter !== 'ALL' && $bankType !== $bankFilter) {
+                continue;
+            }
+
+            $this->eligible++;
+
+            $metadata = $this->buildMetadata(
+                $disk,
+                $relativePath,
+                $bankType,
+                $createdBy
+            );
+
+            if ($this->recordAlreadyExists($metadata)) {
+                $this->existing++;
+                continue;
+            }
+
+            if ($dryRun) {
+                if ($this->eligible <= 20) {
+                    $this->line(
+                        sprintf(
+                            '[DRY RUN] %s | %s',
+                            $bankType,
+                            $relativePath
+                        )
+                    );
+                }
+
+                continue;
+            }
+
+            $buffer[] = $metadata;
+
+            if (count($buffer) >= $chunkSize) {
+                $this->insertChunk($buffer);
+                $buffer = [];
+            }
+        }
+
+        if (!$dryRun && !empty($buffer)) {
+            $this->insertChunk($buffer);
+        }
+
+        $this->newLine();
+        $this->table(
+            ['Result', 'Count'],
+            [
+                ['Files scanned', $this->scanned],
+                ['Eligible ICICI/SBI files', $this->eligible],
+                ['Records created', $this->created],
+                ['Existing records skipped', $this->existing],
+                ['Unsupported/unidentified files', $this->unsupported],
+                ['Failed records', $this->failed],
+            ]
+        );
+
+        if ($dryRun) {
+            $this->warn(
+                'Dry run only. No database rows were created.'
+            );
+        } else {
+            $this->info(
+                'bank_files recovery completed. No transaction rows were deleted.'
+            );
+        }
+
+        return $this->failed > 0
+            ? self::FAILURE
+            : self::SUCCESS;
+    }
+
+    private function normalisePrivatePath(string $path): string
+    {
+        if (Str::startsWith($path, 'private/')) {
+            return $path;
+        }
+
+        return 'private/' . $path;
+    }
+
+    private function resolveCreatedBy(): ?int
+    {
+        $option = $thprivate function normalisePrivatePath(string $path): string
+{
+    $path = trim($path, '/');
+
+    if (Str::startsWith($path, 'private/')) {
+        $path = Str::after($path, 'private/');
+    }
+
+    return $path;
+}is->option('created-by');
+
+        if ($option !== null && $option !== '') {
+            return (int) $option;
+        }
+
+        if (!Schema::hasTable('users')) {
+            return null;
+        }
+
+        $superadmin = DB::table('users')
+            ->whereRaw('UPPER(role) = ?', ['SUPERADMIN'])
+            ->orderBy('id')
+            ->value('id');
+
+        if ($superadmin !== null) {
+            return (int) $superadmin;
+        }
+
+        $firstUser = DB::table('users')
+            ->orderBy('id')
+            ->value('id');
+
+        return $firstUser !== null ? (int) $firstUser : null;
+    }private function normalisePrivatePath(string $path): string
+{
+    $path = trim($path, '/');
+
+    if (Str::startsWith($path, 'private/')) {
+        $path = Str::after($path, 'private/');
+    }
+
+    return $path;
+}
+
+private function resolveCreatedBy(): ?int
+{
+    $option = $this->option('created-by');
+
+    if ($option !== null && $option !== '') {
+        return (int) $option;
+    }
+
+    if (!Schema::hasTable('users')) {
+        return null;
+    }
+
+    $superadmin = DB::table('users')
+        ->whereRaw('UPPER(role) = ?', ['SUPERADMIN'])
+        ->orderBy('id')
+        ->value('id');
+
+    if ($superadmin !== null) {
+        return (int) $superadmin;
+    }
+
+    $firstUser = DB::table('users')
+        ->orderBy('id')
+        ->value('id');
+
+    return $firstUser !== null ? (int) $firstUser : null;
+}
+
+    private function detectBankType(string $relativePath): ?string
+    {
+        $searchText = strtoupper(
+            str_replace(['-', '_', '.'], ' ', $relativePath)
+        );
+
+        if (
+            Str::contains($searchText, 'ICICI') ||
+            Str::contains($searchText, 'ICIC')
+        ) {
+            return 'ICICI';
+        }
+
+        if (
+            Str::contains($searchText, 'SBI') ||
+            Str::contains($searchText, 'STATE BANK')
+        ) {
+            return 'SBI';
+        }
+
+        /*
+         * Optional fallback based on folder names.
+         */
+        $segments = array_map(
+            static fn (string $segment): string => strtoupper($segment),
+            explode('/', $relativePath)
+        );
+
+        if (in_array('ICICI', $segments, true)) {
+            return 'ICICI';
+        }
+
+        if (in_array('SBI', $segments, true)) {
+            return 'SBI';
+        }
+
+        return null;
+    }
+
+    private function buildMetadata(
+        $disk,
+        string $relativePath,
+        string $bankType,
+        ?int $createdBy
+    ): array {
+        $filename = basename($relativePath);
+        $size = null;
+        $modifiedTimestamp = null;
+
+        try {
+            $size = $disk->size($relativePath);
+        } catch (Throwable) {
+            // Keep size as null.
+        }
+
+        try {
+            $modifiedTimestamp = $disk->lastModified($relativePath);
+        } catch (Throwable) {
+            // Keep timestamp as null.
+        }
+
+        $fileDate = $modifiedTimestamp
+            ? Carbon::createFromTimestamp($modifiedTimestamp)
+            : now();
+
+        $values = [];
+
+        $this->setIfColumnExists(
+            $values,
+            'original_filename',
+            $filename
+        );
+
+        $this->setIfColumnExists(
+            $values,
+            'filename',
+            $filename
+        );
+
+        $this->setIfColumnExists(
+            $values,
+            'stored_filename',
+            $filename
+        );
+
+        $this->setIfColumnExists(
+            $values,
+            'file_path',
+            $relativePath
+        );
+
+        $this->setIfColumnExists(
+            $values,
+            'stored_path',
+            $relativePath
+        );
+
+        $this->setIfColumnExists(
+            $values,
+            'path',
+            $relativePath
+        );
+
+        $this->setIfColumnExists(
+            $values,
+            'disk',
+            'local'
+        );
+
+        $this->setIfColumnExists(
+            $values,
+            'mime_type',
+            $this->guessMimeType($filename)
+        );
+
+        $this->setIfColumnExists(
+            $values,
+            'file_size',
+            $size
+        );
+
+        $this->setIfColumnExists(
+            $values,
+            'size',
+            $size
+        );
+
+        $this->setIfColumnExists(
+            $values,
+            'bank_type',
+            $bankType
+        );
+
+        $this->setIfColumnExists(
+            $values,
+            'bank',
+            $bankType
+        );
+
+        $this->setIfColumnExists(
+            $values,
+            'status',
+            'RECEIVED'
+        );
+
+        $this->setIfColumnExists(
+            $values,
+            'processing_status',
+            'RECEIVED'
+        );
+
+        $this->setIfColumnExists(
+            $values,
+            'received_at',
+            $fileDate
+        );
+
+        $this->setIfColumnExists(
+            $values,
+            'uploaded_at',
+            $fileDate
+        );
+
+        $this->setIfColumnExists(
+            $values,
+            'created_by',
+            $createdBy
+        );
+
+        $this->setIfColumnExists(
+            $values,
+            'created_at',
+            now()
+        );
+
+        $this->setIfColumnExists(
+            $values,
+            'updated_at',
+            now()
+        );
+
+        return $values;
+    }private function detectBankType(string $relativePath): ?string
+{
+    $filename = strtoupper(basename($relativePath));
+
+    /*
+     * SBI files seen in the existing storage:
+     * rev_SBI_21928.txt
+     * SBI_....csv
+     */
+    if (
+        Str::contains($filename, 'SBI') ||
+        Str::startsWith($filename, 'REV_SBI_')
+    ) {
+        return 'SBI';
+    }
+
+    /*
+     * ICICI H2H files seen in the existing storage:
+     * BRCILCHN_HLCDN_100426_479460136.xls
+     * BRCILRAJ_HLCDN_100426_479455079.xls
+     */
+    if (
+        Str::contains($filename, 'ICICI') ||
+        (
+            Str::startsWith($filename, 'BRCIL') &&
+            Str::contains($filename, 'HLCDN')
+        )
+    ) {
+        return 'ICICI';
+    }
+
+    return null;
+}
+    private function setIfColumnExists(
+        array &$values,
+        string $column,
+        mixed $value
+    ): void {
+        if (!Schema::hasColumn('bank_files', $column)) {
+            return;
+        }
+
+        $values[$column] = $value;
+    }
+
+    private function recordAlreadyExists(array $metadata): bool
+    {
+        $pathColumn = $this->firstExistingColumn([
+            'file_path',
+            'stored_path',
+            'path',
+        ]);
+
+        if ($pathColumn !== null && isset($metadata[$pathColumn])) {
+            if (
+                DB::table('bank_files')
+                    ->where($pathColumn, $metadata[$pathColumn])
+                    ->exists()
+            ) {
+                return true;
+            }
+        }
+
+        $nameColumn = $this->firstExistingColumn([
+            'original_filename',
+            'filename',
+            'stored_filename',
+        ]);
+
+        if ($nameColumn !== null && isset($metadata[$nameColumn])) {
+            $query = DB::table('bank_files')
+                ->where($nameColumn, $metadata[$nameColumn]);
+
+            if (
+                Schema::hasColumn('bank_files', 'file_size') &&
+                isset($metadata['file_size'])
+            ) {
+                $query->where('file_size', $metadata['file_size']);
+            }
+
+            if ($query->exists()) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private function firstExistingColumn(array $columns): ?string
+    {
+        foreach ($columns as $column) {
+            if (Schema::hasColumn('bank_files', $column)) {
+                return $column;
+            }
+        }
+
+        return null;
+    }
+
+    private function insertChunk(array $records): void
+    {
+        DB::beginTransaction();
+
+        try {
+            foreach ($records as $record) {
+                try {
+                    BankFile::query()->create($record);
+                    $this->created++;
+                } catch (Throwable $exception) {
+                    $this->failed++;
+
+                    $this->error(
+                        'Failed: ' .
+                        ($record['original_filename']
+                            ?? $record['filename']
+                            ?? $record['file_path']
+                            ?? 'unknown file') .
+                        ' | ' .
+                        $exception->getMessage()
+                    );
+                }
+            }
+
+            DB::commit();
+        } catch (Throwable $exception) {
+            DB::rollBack();
+
+            $this->failed += count($records);
+
+            $this->error(
+                'Chunk failed: ' . $exception->getMessage()
+            );
+        }
+    }
+
+    private function guessMimeType(string $filename): string
+    {
+        return match (strtolower(pathinfo($filename, PATHINFO_EXTENSION))) {
+            'xls' => 'application/vnd.ms-excel',
+            'xlsx' => 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+            'csv' => 'text/csv',
+            'txt' => 'text/plain',
+            default => 'application/octet-stream',
+        };
+    }
+}

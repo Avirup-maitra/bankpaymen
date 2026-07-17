@@ -80,6 +80,10 @@ class AdminController extends Controller
             'BANK_INBOX_PATH' => env('BANK_INBOX_PATH'),
             'BANK_PROCESSED_PATH' => env('BANK_PROCESSED_PATH'),
             'BANK_REJECTED_PATH' => env('BANK_REJECTED_PATH'),
+            'ICICI_AUTO_INBOX_PATH' => config('bankfiles.auto_import.icici_inbox'),
+            'SBI_AUTO_INBOX_PATH' => config('bankfiles.auto_import.sbi_inbox'),
+            'BANK_AUTO_PROCESSED_PATH' => config('bankfiles.auto_import.processed'),
+            'BANK_AUTO_REJECTED_PATH' => config('bankfiles.auto_import.rejected'),
             'EXPORT_OUTBOX_PATH' => env('EXPORT_OUTBOX_PATH'),
         ];
         

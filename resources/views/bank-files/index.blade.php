@@ -14,6 +14,53 @@
                 </div>
             @endif
 
+            <div class="mb-6 flex justify-end">
+                @can('bulk-upload-bank-files')
+                    <a href="{{ route('bulk-upload.create') }}" class="inline-flex items-center px-4 py-2 bg-blue-600 border border-transparent rounded-md font-semibold text-sm text-white hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2">
+                        Bulk Upload Files
+                    </a>
+                @endcan
+            </div>
+
+            @can('bulk-upload-bank-files')
+                @if(isset($bulkSessions) && $bulkSessions->count())
+                <div class="bg-white dark:bg-gray-800 overflow-hidden shadow-sm sm:rounded-lg mb-6">
+                    <div class="p-6 text-gray-900 dark:text-gray-100">
+                        <h3 class="text-lg font-semibold mb-4">Bulk Upload Sessions</h3>
+                        <div class="overflow-x-auto">
+                            <table class="min-w-full divide-y divide-gray-200 dark:divide-gray-700">
+                                <thead>
+                                    <tr>
+                                        <th class="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Session</th>
+                                        <th class="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Bank</th>
+                                        <th class="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Status</th>
+                                        <th class="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Files</th>
+                                        <th class="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Rows OK/Rej</th>
+                                        <th class="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Amount</th>
+                                        <th class="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Action</th>
+                                    </tr>
+                                </thead>
+                                <tbody class="divide-y divide-gray-200 dark:divide-gray-700">
+                                    @foreach($bulkSessions as $session)
+                                        <tr>
+                                            <td class="px-4 py-2 text-sm">{{ $session->created_at->format('Y-m-d H:i') }}</td>
+                                            <td class="px-4 py-2 text-sm">{{ $session->bank_type }}</td>
+                                            <td class="px-4 py-2 text-sm">{{ $session->status }}</td>
+                                            <td class="px-4 py-2 text-sm">{{ $session->files_processed + $session->files_failed }}/{{ $session->total_files_uploaded }}</td>
+                                            <td class="px-4 py-2 text-sm"><span class="text-green-600">{{ $session->total_rows_success }}</span> / <span class="text-red-600">{{ $session->total_rows_rejected }}</span></td>
+                                            <td class="px-4 py-2 text-sm">{{ number_format($session->total_amount_processed, 2) }}</td>
+                                            <td class="px-4 py-2 text-sm"><a class="text-indigo-600 hover:text-indigo-900 dark:text-indigo-400" href="{{ route('bank-files.summary', ['session_id' => $session->session_id]) }}">Summary</a></td>
+                                        </tr>
+                                    @endforeach
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+                @endif
+            @endcan
+
+
             <div class="bg-white dark:bg-gray-800 overflow-hidden shadow-sm sm:rounded-lg">
                 <div class="p-6 text-gray-900 dark:text-gray-100">
                     
